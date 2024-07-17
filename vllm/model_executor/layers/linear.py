@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.nn.functional as F
@@ -122,6 +122,36 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return F.linear(x, layer.weight, bias)
 
 
+class TiedWeightLinearMethod(UnquantizedLinearMethod):
+    """Linear method base with noop create_weights
+
+    Can be used to prevent the initialization of weights
+    during the initialization of modules with weight tying.
+    """
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        ...
+
+
+class QuantizationConfigOverride(QuantizationConfig):
+    """Config class to inject a specific LinearMethod.
+    """
+
+    def __init__(self, cls: Type[LinearMethodBase]):
+        self.cls = cls
+
+    def get_quant_method(self,
+                         layer: torch.nn.Module) -> Optional[LinearMethodBase]:
+        return self.cls()
+
+
+QuantizationConfigOverride.__abstractmethods__ = frozenset()
+
+
 class LinearBase(torch.nn.Module):
     """Base linear layer.
 
@@ -195,6 +225,15 @@ class ReplicatedLinear(LinearBase):
             set_weight_attrs(self.bias, {"output_dim": 0})
         else:
             self.register_parameter("bias", None)
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        # If the weight on disk does not have a shape, give it one
+        # (such scales for AutoFp8).
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert param.size() == loaded_weight.size()
+        param.data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if not self.skip_bias_add else None
